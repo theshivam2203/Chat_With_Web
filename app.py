@@ -4,11 +4,17 @@ from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain_core.documents import Document
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from crawl4ai import WebCrawler
 from urllib.parse import urlparse
 import os
 import shutil
 import logging
+import requests
+from bs4 import BeautifulSoup
+import asyncio
+import nest_asyncio
+
+# Apply nest_asyncio to handle async operations in Streamlit
+nest_asyncio.apply()
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -35,11 +41,38 @@ def is_valid_url(url):
         logger.error(f"URL validation failed: {e}")
         return False
 
+def get_webpage_content(url):
+    try:
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        }
+        response = requests.get(url, headers=headers, timeout=10)
+        response.raise_for_status()
+        
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        # Remove script and style elements
+        for script in soup(["script", "style"]):
+            script.decompose()
+            
+        # Get text content
+        text = soup.get_text(separator='\n', strip=True)
+        
+        # Clean up text
+        lines = (line.strip() for line in text.splitlines())
+        chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
+        text = '\n'.join(chunk for chunk in chunks if chunk)
+        
+        return text
+    except Exception as e:
+        logger.error(f"Error fetching webpage content: {e}")
+        return None
+
 class VectorDatabase:
     def __init__(self):
         self.embeddings = HuggingFaceEmbeddings(
             model_name='sentence-transformers/all-MiniLM-L6-v2',
-            model_kwargs={'device': 'cpu'}  # Changed to CPU for cloud compatibility
+            model_kwargs={'device': 'cpu'}
         )
         self.db = None
 
@@ -50,15 +83,13 @@ class VectorDatabase:
                 url = "https://" + url
 
             logger.info(f"Fetching documents from URL: {url}")
-            crawler = WebCrawler()
-            crawler.warmup()
-            result = crawler.run(url)
+            content = get_webpage_content(url)
 
-            if not result or not result.markdown:
+            if not content:
                 logger.warning(f"No content fetched from URL: {url}")
                 return None
 
-            documents = [Document(page_content=result.markdown, metadata={"source": url})]
+            documents = [Document(page_content=content, metadata={"source": url})]
             text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
             texts = text_splitter.split_documents(documents)
 
